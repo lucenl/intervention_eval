@@ -1,4 +1,4 @@
-# Inject News Experiment Configuration
+# Experiment configuration
 
 
 celebrities:
@@ -33,42 +33,26 @@ celebrities:
     username: "KimKardashian"
     gender: "female"
 
-
-
-experiment:
-  name: "test_dead"
-  description: "run 200 users per group (1000 in total) for 20 time steps"
-  include_celebrity_hint: true
-  new_prompt: true
-  include_bio: false
-  feed_constraint_prompt: false
-
+model:
+  type: "gpt-4o-mini"
+  temperature: 0.7
 
 data:
-  # NOTE: run_pipeline.py overwrites agents_file for each batch with the path
-  # under pipeline_data/agents/. This default placeholder is only used if you
-  # invoke addnews_simulation.py directly without the orchestrator.
-  agents_file: "./pipeline_data/agents/agents_batch_0.csv"
   db_path: "./database/preloaded_data.db"
 
 simulation:
   activate_prob: 1            # Probability each agent is active per timestep
   num_timesteps: 20           # Total simulation steps
-  
+
 # Twitter settings
 twitter:
   refresh_rec_post_count: 40
   max_rec_post_len: 40
-  following_post_count: 10
   political_ratio: 0.1      # Ratio of political posts in recommendations
-  
-model:
-  type: "gpt-4o-mini"
-  temperature: 0.7
-  max_tokens: 280
 
-analysis:
-  # Metrics to track
-  track_celebrity_engagement: true
-  track_follow_patterns: true
-  track_sentiment: true
+# OpenAI API limits; set these to your account's limits
+api:
+  max_concurrent: 100         # Maximum number of requests in flight
+  requests_per_minute: 500    # Maximum number of requests started per minute
+  price_per_1m_input: null    # Optional: USD per 1M input tokens, enables the Cost column
+  price_per_1m_output: null   # Optional: USD per 1M output tokens

@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 import os
-import time
-import yaml
 import json
 import glob
 import asyncio
@@ -16,22 +14,19 @@ except ImportError:
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
-TOTAL_AGENTS = 16000
-BATCH_SIZE = 1000
-START_BATCH_IDX = 14
+NUM_AGENTS = 100
+BATCH_SIZE = 50
 
-BASE_CONFIG_PATH = os.path.join(PROJECT_ROOT, "unified_config.yaml")
 DATA_DIR = os.path.join(PROJECT_ROOT, "pipeline_data")
 
 AGENTS_DIR = os.path.join(DATA_DIR, "agents")
-CONFIGS_DIR = os.path.join(DATA_DIR, "configs")
 LOGS_DIR = os.path.join(DATA_DIR, "logs")
 DB_OUTPUT_DIR = os.path.join(DATA_DIR, "databases")
 
 MAX_CONCURRENT_BATCHES = 4
 COOLDOWN_AFTER_CHUNK = 30
 
-for d in [AGENTS_DIR, CONFIGS_DIR, LOGS_DIR, DB_OUTPUT_DIR]:
+for d in [AGENTS_DIR, LOGS_DIR, DB_OUTPUT_DIR]:
     os.makedirs(d, exist_ok=True)
 
 
@@ -57,15 +52,16 @@ def load_existing_usernames(agents_dir):
     return seen_usernames
 
 
-async def run_single_simulation(batch_idx: int, batch_config_path: str, db_output_dir: str):
+async def run_single_simulation(batch_idx: int, agent_csv_path: str, db_output_dir: str):
     batch_id_str = f"batch_{batch_idx}"
     run_log_path = os.path.join(LOGS_DIR, f"run_{batch_id_str}.log")
 
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Starting simulation for Batch {batch_idx + 1}")
 
     cmd = [
-        "python3", "-u", "addnews_simulation.py",
-        "--config_path", batch_config_path,
+        "python3", "-u", "run_simulation.py",
+        "--agents_file", agent_csv_path,
+        "--name", f"exp_unified_{batch_id_str}",
         "--output_dir", db_output_dir
     ]
 
@@ -86,43 +82,37 @@ async def run_single_simulation(batch_idx: int, batch_config_path: str, db_outpu
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Execution error for batch {batch_idx + 1}: {e}")
 
 
-async def run_all_batches_parallel():
-    num_batches = (TOTAL_AGENTS + BATCH_SIZE - 1) // BATCH_SIZE
-
-    if START_BATCH_IDX >= num_batches:
-        print(f"START_BATCH_IDX={START_BATCH_IDX} >= total batches={num_batches}. Nothing to run.")
-        return
+async def run_all_batches_parallel(num_agents: int, batch_size: int):
+    num_batches = (num_agents + batch_size - 1) // batch_size
 
     global_seen_usernames = load_existing_usernames(AGENTS_DIR)
 
     print(f"\nStarting Parallel Pipeline")
-    print(f"   Goal: {TOTAL_AGENTS} agents | Batches: {START_BATCH_IDX} -> {num_batches-1} | Concurrent: {MAX_CONCURRENT_BATCHES}")
+    print(f"   Goal: {num_agents} agents | Batches: {num_batches} | Concurrent: {MAX_CONCURRENT_BATCHES}")
 
     pending_tasks = []
 
-    for batch_idx in range(START_BATCH_IDX, num_batches):
+    for batch_idx in range(num_batches):
         print(f"\n{'_'*60}")
         print(f"Processing Batch {batch_idx + 1}/{num_batches} (idx={batch_idx})")
 
         batch_id_str = f"batch_{batch_idx}"
         agent_csv_path = os.path.join(AGENTS_DIR, f"agents_{batch_id_str}.csv")
         agent_json_path = os.path.join(AGENTS_DIR, f"agents_{batch_id_str}.json")
-        batch_config_path = os.path.join(CONFIGS_DIR, f"config_{batch_id_str}.yaml")
 
         # Step 1: Generate Agents
         if os.path.exists(agent_csv_path) and os.path.exists(agent_json_path):
             print(f"Agents exist. Skipping generation.")
         else:
-            print(f"Generating {BATCH_SIZE} agents...")
+            n = min(batch_size, num_agents - batch_idx * batch_size)
+            print(f"Generating {n} agents...")
             try:
                 agents = generate_agents_batch(
-                    num_users=BATCH_SIZE,
+                    num_users=n,
                     batch_size=25,
-                    use_gpt=True,
-                    balanced_gender=False,
                     max_workers=5
                 )
-                global_start_id = batch_idx * BATCH_SIZE
+                global_start_id = batch_idx * batch_size
                 print(f"Assigning IDs & de-duping...")
                 duplicates_fixed = 0
                 for i, agent in enumerate(agents):
@@ -145,23 +135,10 @@ async def run_all_batches_parallel():
                 print(f"Generation failed for batch {batch_idx}: {e}")
                 break
 
-        # Step 2: Prepare Config
-        try:
-            with open(BASE_CONFIG_PATH, 'r', encoding='utf-8') as f:
-                config_data = yaml.safe_load(f)
-            config_data['data']['agents_file'] = agent_csv_path
-            config_data['experiment']['name'] = f"exp_unified_{batch_id_str}"
-            with open(batch_config_path, 'w', encoding='utf-8') as f:
-                yaml.dump(config_data, f, default_flow_style=False, allow_unicode=True)
-            print(f"Config ready.")
-        except Exception as e:
-            print(f"Config prep failed: {e}")
-            break
-
-        # Step 3: Queue simulation
+        # Step 2: Queue simulation
         print(f"Queuing simulation task...")
         pending_tasks.append(
-            run_single_simulation(batch_idx, batch_config_path, DB_OUTPUT_DIR)
+            run_single_simulation(batch_idx, agent_csv_path, DB_OUTPUT_DIR)
         )
 
         if len(pending_tasks) >= MAX_CONCURRENT_BATCHES:
@@ -180,4 +157,4 @@ async def run_all_batches_parallel():
 if __name__ == "__main__":
     if not os.getenv("OPENAI_API_KEY"):
         print("WARNING: OPENAI_API_KEY not set.")
-    asyncio.run(run_all_batches_parallel())
+    asyncio.run(run_all_batches_parallel(NUM_AGENTS, BATCH_SIZE))

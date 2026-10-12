@@ -9,7 +9,7 @@ class UnifiedExperimentTreatment(Treatment):
     """Unified experiment controller."""
 
     def __init__(self, celebrities: List[Dict[str, str]] = None,
-                 celebrity_seed: int = 20260413):
+                 celebrity_seed: int = 20260413, global_id_offset: int = 0):
         super().__init__()
         self.logger = logging.getLogger("social.treatment")
         self.treatment_type = "unified"
@@ -22,12 +22,14 @@ class UnifiedExperimentTreatment(Treatment):
 
         self.celebrities = celebrities or []
         self.celebrity_seed = celebrity_seed
+        self.global_id_offset = global_id_offset
         self.user_assignments = {}
         self.step_news_cache = {}
+        self.celeb_injected = {}
 
     def _pick_celebrity(self, user_id: int, step_number: int, post_id: int) -> Dict[str, str]:
         """Deterministic celebrity assignment keyed on (user, step, post)."""
-        rng = random.Random(f"{self.celebrity_seed}:{user_id}:{step_number}:{post_id}")
+        rng = random.Random(f"{self.celebrity_seed}:{user_id + self.global_id_offset}:{step_number}:{post_id}")
         return rng.choice(self.celebrities)
 
     def _get_user_group(self, user_id: int) -> int:
@@ -66,24 +68,29 @@ class UnifiedExperimentTreatment(Treatment):
             new_rec = rec.copy()
 
             if group == self.GROUP_CONTROL:
-                log_records.append((user_id, "control", -1, -1, -1, step_number))
+                log_records.append((user_id, "control", -1, -1, -1, step_number, None, None, None))
 
             elif group == self.GROUP_INJECT_2:
-                new_rec = self._inject_news(new_rec, shared_news['news_2'])
-                self._log_injection(log_records, user_id, "inject_2", shared_news['news_2'], step_number)
+                new_rec, replaced = self._inject_news(new_rec, shared_news['news_2'])
+                self._log_injection(log_records, user_id, "inject_2", shared_news['news_2'], step_number,
+                                    replaced, new_rec, new_rec)
 
             elif group == self.GROUP_INJECT_4:
-                new_rec = self._inject_news(new_rec, shared_news['news_4'])
-                self._log_injection(log_records, user_id, "inject_4", shared_news['news_4'], step_number)
+                new_rec, replaced = self._inject_news(new_rec, shared_news['news_4'])
+                self._log_injection(log_records, user_id, "inject_4", shared_news['news_4'], step_number,
+                                    replaced, new_rec, new_rec)
 
             elif group == self.GROUP_UPRANK:
-                new_rec = self._inject_news(new_rec, shared_news['news_2'])
-                new_rec = self._uprank_news(new_rec, shared_news['news_2'])
-                self._log_injection(log_records, user_id, "uprank", shared_news['news_2'], step_number)
+                injected, replaced = self._inject_news(new_rec, shared_news['news_2'])
+                new_rec = self._uprank_news(injected, shared_news['news_2'])
+                self._log_injection(log_records, user_id, "uprank", shared_news['news_2'], step_number,
+                                    replaced, injected, new_rec)
 
             elif group == self.GROUP_CELEB:
-                new_rec = self._inject_news(new_rec, shared_news['news_2'])
-                self._log_injection(log_records, user_id, "celebrity_logic", shared_news['news_2'], step_number)
+                new_rec, replaced = self._inject_news(new_rec, shared_news['news_2'])
+                self._log_injection(log_records, user_id, "celebrity_logic", shared_news['news_2'], step_number,
+                                    replaced, new_rec, new_rec)
+                self.celeb_injected[user_id] = (step_number, set(shared_news['news_2']))
 
             if len(new_rec) > max_rec_post_len:
                 new_rec = new_rec[:max_rec_post_len]
@@ -92,18 +99,20 @@ class UnifiedExperimentTreatment(Treatment):
 
         return new_rec_matrix, log_records
 
-    def apply_display(self, posts: List[Dict[str, any]], user_id: int, step_number: int, news_ids: Set[int]) -> Tuple[List[Dict[str, any]], List[Tuple]]:
+    def apply_display(self, posts: List[Dict[str, any]], user_id: int) -> Tuple[List[Dict[str, any]], List[Tuple]]:
         group = self._get_user_group(user_id)
         log_records = []
 
         if group != self.GROUP_CELEB:
             return posts, log_records
 
+        step_number, injected = self.celeb_injected.get(user_id, (None, set()))
+
         modified_posts = []
         for post in posts:
             post_id = post.get('post_id')
 
-            if post_id in news_ids:
+            if post_id in injected:
                 if not self.celebrities:
                     modified_posts.append(post)
                     continue
@@ -120,29 +129,31 @@ class UnifiedExperimentTreatment(Treatment):
 
                 log_records.append((
                     user_id, "celebrity_render", post_id,
-                    post.get('user_name'), post.get('name'),
-                    new_username, new_name, step_number
+                    post.get('name'), post.get('user_name'),
+                    new_name, new_username, step_number
                 ))
             else:
                 modified_posts.append(post)
 
         return modified_posts, log_records
 
-    def _inject_news(self, rec_list: List[int], news_to_inject: List[int]) -> List[int]:
+    def _inject_news(self, rec_list: List[int], news_to_inject: List[int]) -> Tuple[List[int], Dict[int, int]]:
         current_news = set(news_to_inject)
         candidates = [i for i, pid in enumerate(rec_list) if pid not in current_news]
         needed = [n for n in news_to_inject if n not in rec_list]
 
         if not needed:
-            return rec_list
+            return rec_list, {}
 
         replace_indices = random.sample(candidates, min(len(candidates), len(needed)))
 
         new_list = rec_list.copy()
+        replaced = {}
         for idx, news_id in zip(replace_indices, needed):
+            replaced[news_id] = rec_list[idx]
             new_list[idx] = news_id
 
-        return new_list
+        return new_list, replaced
 
     def _uprank_news(self, rec_list: List[int], target_news: List[int]) -> List[int]:
         new_list = rec_list.copy()
@@ -163,9 +174,11 @@ class UnifiedExperimentTreatment(Treatment):
 
         return new_list
 
-    def _log_injection(self, logs, uid, type_str, news_list, step):
+    def _log_injection(self, logs, uid, type_str, news_list, step, replaced, before_uprank, final):
         for nid in news_list:
-            logs.append((uid, type_str, -1, nid, -1, step))
+            original_position = before_uprank.index(nid) if nid in before_uprank else None
+            position = final.index(nid) if nid in final else None
+            logs.append((uid, type_str, -1, nid, -1, step, replaced.get(nid), position, original_position))
 
     def save_assignments_to_db(self, db_path: str):
         try:
